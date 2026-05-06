@@ -1,0 +1,109 @@
+name: Validate commit messages
+
+on:
+  workflow_call:
+    inputs:
+      types:
+        required: true
+        type: string
+        description: "JSON array of allowed types (e.g. ['feat','fix'])"
+      jira-pattern:
+        required: false
+        type: string
+        default: "[A-Z]+-[0-9]+"
+        description: "Regex for Jira ticket"
+      no-jira-keywords:
+        required: false
+        type: string
+        default: '["no-jira","[no-jira]"]'
+        description: "JSON array of allowed no-jira override keywords"
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate commits
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const types = JSON.parse('${{ inputs.types }}');
+            const jiraPattern = new RegExp('${{ inputs.jira-pattern }}');
+            const noJiraKeywords = JSON.parse('${{ inputs.no-jira-keywords }}');
+
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.setFailed("This workflow must run on pull_request");
+              return;
+            }
+
+            const commits = await github.paginate(
+              github.rest.pulls.listCommits,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+                per_page: 100
+              }
+            );
+
+            const errors = [];
+
+            for (const commit of commits) {
+              const message = commit.commit.message;
+              const [subject, ...bodyParts] = message.split("\n");
+              const body = bodyParts.join("\n");
+
+              const lowerSubject = subject.toLowerCase();
+              const lowerBody = body.toLowerCase();
+
+              // ---- Rule 1: subject format ----
+              const typePattern = types.join("|");
+              const subjectRegex = new RegExp(
+                `^(${jiraPattern.source}\\s*\\|\\s*)?(${typePattern}):\\s+.+$`,
+                "i"
+              );
+
+              if (!subjectRegex.test(subject)) {
+                errors.push(
+                  `❌ Invalid subject format: "${subject}"\n\n` +
+                  `Expected:\n` +
+                  `  "type: message"\n` +
+                  `  or\n` +
+                  `  "TICKET | type: message"\n\n` +
+                  `Examples:\n` +
+                  `  - feat: add login flow\n` +
+                  `  - ABC-123 | fix: handle null pointer`
+                );
+              }
+
+              // ---- Rule 2: Jira or override ----
+              const hasTicketInSubject = jiraPattern.test(subject);
+              const hasTicketInBody = jiraPattern.test(body);
+
+              const hasNoJiraOverride =
+                noJiraKeywords.some(k => lowerSubject.includes(k)) ||
+                noJiraKeywords.some(k => lowerBody.includes(k));
+
+              if (!hasTicketInSubject && !hasTicketInBody && !hasNoJiraOverride) {
+                errors.push(
+                  `❌ Missing Jira ticket: "${subject}"\n\n` +
+                  `👉 Add a Jira ticket:\n` +
+                  `  - ABC-123 | feat: add login\n` +
+                  `  - OR include in body:\n` +
+                  `    Fixes: ABC-123\n\n` +
+                  `👉 Or explicitly bypass for small changes:\n` +
+                  `  - add "no-jira" in the commit message`
+                );
+              }
+            }
+
+            if (errors.length > 0) {
+              core.setFailed(
+                `Commit message validation failed:\n\n${errors.join("\n\n---\n\n")}`
+              );
+            }
