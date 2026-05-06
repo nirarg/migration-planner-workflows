@@ -1,0 +1,70 @@
+name: PR label commands (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      allowed-labels:
+        required: true
+        type: string
+        description: "JSON array of allowed labels"
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  handle-comment:
+    if: github.event.issue.pull_request != null
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = context.payload.comment.body.trim().toLowerCase();
+            const prNumber = context.payload.issue.number;
+
+            const allowedLabels = JSON.parse('${{ inputs.allowed-labels }}');
+
+            const match = comment.match(/^\/([a-z-]+)(?:\s+cancel)?$/);
+            if (!match) return;
+
+            const label = match[1];
+            const isCancel = comment.endsWith(" cancel");
+
+            if (!allowedLabels.includes(label)) {
+              console.log("Label not allowed");
+              return;
+            }
+
+            // Restrict to collaborators
+            const { data: permission } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username: context.payload.comment.user.login
+            });
+
+            if (!["admin", "write", "maintain"].includes(permission.permission)) {
+              console.log("User not allowed");
+              return;
+            }
+
+            if (!isCancel) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                labels: [label]
+              });
+            } else {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  name: label
+                });
+              } catch (e) {
+                console.log("Label not present");
+              }
+            }

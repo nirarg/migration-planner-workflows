@@ -172,23 +172,265 @@ To enable actual npm publishing in CI:
 
 When enabled, test packages are automatically unpublished after successful publish.
 
+---
+
+### 3. PR Title and Description Validation Workflow
+
+**Path:** `.github/workflows/validate-pr-title-description.yml`
+
+A reusable workflow that validates PR title format and JIRA ticket requirements.
+
+#### Features
+
+- **Title Format Validation**: Enforces conventional commit-style PR titles (e.g., `feat: add feature`)
+- **JIRA Integration**: Requires JIRA tickets for specified PR types (configurable)
+- **Type Output**: Exports the PR type for use by other workflows (e.g., approval checks)
+- **Configurable**: Customize allowed types, JIRA pattern, and JIRA requirements
+
+#### Usage
+
+Add the following workflow to your repository (e.g., `.github/workflows/pr-validation.yml`):
+
+```yaml
+name: PR Validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  pull-requests: read
+  contents: read
+
+jobs:
+  validate-pr-title:
+    uses: nirarg/migration-planner-workflows/.github/workflows/validate-pr-title-description.yml@main
+    with:
+      allowed-types: '["feat","fix","ci","build","chore","docs","refactor","test","style","perf"]'
+      jira-pattern: "ECOPROJECT-[0-9]+"
+      jira-required-types: '["feat","fix"]'
+```
+
+#### Inputs
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `allowed-types` | No | `["feat","fix","ci","build","chore","docs","refactor","test","style","perf"]` | JSON array of allowed PR types |
+| `jira-pattern` | No | `[A-Z]+-[0-9]+` | Regex pattern for JIRA ticket validation |
+| `jira-required-types` | No | `["feat","fix"]` | JSON array of PR types that require JIRA tickets |
+
+#### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `pr-type` | The PR type extracted from the title (e.g., "feat", "chore") |
+
+#### PR Title Format
+
+The workflow accepts two title formats:
+
+1. **With JIRA**: `JIRA-123 | type: description`
+   - Example: `ECOPROJECT-456 | feat: add user authentication`
+2. **Without JIRA**: `type: description`
+   - Example: `chore: update dependencies`
+
+For PR types in `jira-required-types`, the JIRA ticket can appear in either the title or the PR description.
+
+---
+
+### 4. PR Approval Check Workflow
+
+**Path:** `.github/workflows/pr-approval-check.yml`
+
+A reusable workflow that auto-approves PRs based on type and author to work with GitHub's branch protection.
+
+#### Features
+
+- **Auto-approval**: Automatically approves PRs that only need 1 human approval
+- **Type-based Logic**: feat/fix PRs require 2 human approvals (no auto-approve), others get auto-approved after 1 human approval
+- **Bot Author Override**: Bot-authored PRs get auto-approval after 1 human approval
+- **Works with Branch Protection**: Designed for repos with "Require 2 approvals" branch protection rule
+
+#### Usage
+
+This workflow auto-approves eligible PRs when they are created or updated:
+
+```yaml
+name: PR Validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  check-approvals:
+    uses: nirarg/migration-planner-workflows/.github/workflows/pr-approval-check.yml@main
+    with:
+      two-approval-types: '["feat","fix"]'
+      bot-authors: '["dependabot[bot]","renovate[bot]"]'
+```
+
+#### Required Repository Setting
+
+**IMPORTANT:** You must enable workflow approvals in your repository:
+
+1. Go to **Settings** → **Actions** → **General**
+2. Scroll to **Workflow permissions**
+3. Enable: ✅ **"Allow GitHub Actions to create and approve pull requests"**
+4. Click **Save**
+
+Without this setting, the workflow will fail with "Resource not accessible by integration".
+
+#### Alternative: Use a Personal Access Token
+
+If you cannot enable the setting above, use a PAT with `repo` scope:
+
+```yaml
+jobs:
+  check-approvals:
+    uses: nirarg/migration-planner-workflows/.github/workflows/pr-approval-check.yml@main
+    with:
+      two-approval-types: '["feat","fix"]'
+      bot-authors: '["dependabot[bot]","renovate[bot]"]'
+    secrets:
+      github-token: ${{ secrets.MY_PAT }}
+```
+
+**IMPORTANT:** The PAT must be from a **different user** than the PR authors. GitHub prevents self-approval, so:
+- ✅ **Recommended**: Create a dedicated bot/service account, generate a PAT from it, and add it as a collaborator
+- ❌ **Won't work**: Using your own PAT to auto-approve your own PRs
+
+If the workflow detects a self-approval attempt, it will skip with a warning.
+
+#### Inputs
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `pr-type` | No | - | The PR type. If not provided, will be extracted from PR title |
+| `two-approval-types` | No | `["feat","fix"]` | JSON array of PR types requiring 2 human approvals (no auto-approve) |
+| `bot-authors` | No | `["red-hat-konflux[bot]","dependabot[bot]"]` | JSON array of bot usernames that get auto-approval |
+
+#### PR Type Detection
+
+The workflow extracts the PR type from the PR title in the format: `[JIRA |] type: description`
+
+If the PR title doesn't match this format, the workflow will fail with an error.
+
+#### Auto-Approval Logic
+
+The workflow works with GitHub's "Require 2 approvals" branch protection rule:
+
+1. **feat/fix PRs from humans**: Require 2 human approvals (no auto-approve)
+2. **Other PR types from humans** (chore, docs, etc.): Require 1 human approval, workflow auto-approves to provide the 2nd
+3. **Bot-authored PRs**: Require 1 human approval, workflow auto-approves to provide the 2nd
+
+**How it works:**
+- When someone approves a PR, this workflow runs
+- If the PR is eligible for auto-approval (non-feat/fix or bot author) and has only 1 approval, the workflow automatically approves
+- The automatic approval includes a comment explaining why it was auto-approved
+
+Only the latest review state per reviewer is considered. If a reviewer approves then later requests changes, their approval doesn't count.
+
+#### Branch Protection Setup
+
+This workflow requires GitHub branch protection configured with:
+
+1. Enable branch protection for your target branch (e.g., `main`)
+2. **Require 2 approvals** (this is the key setting)
+3. Add `validate-commits` and `validate-pr-title` as required status checks
+4. The workflow automatically provides the 2nd approval when only 1 is needed
+
+---
+
+### 5. PR Welcome Message Workflow
+
+**Path:** `.github/workflows/pr-welcome.yml`
+
+A reusable workflow that posts a welcome comment on new PRs with contribution guidelines.
+
+#### Features
+
+- **Auto-welcome**: Posts a friendly message when PR is opened
+- **Guidelines**: Includes commit format, PR title format, and approval requirements
+- **Label commands**: Shows available label commands for PR management
+- **Configurable**: Customize types, JIRA pattern, labels, and messages per repository
+
+#### Usage
+
+Add the following workflow to your repository (e.g., `.github/workflows/pr-welcome.yml`):
+
+```yaml
+name: PR Welcome
+
+on:
+  pull_request:
+    types: [opened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  welcome:
+    uses: nirarg/migration-planner-workflows/.github/workflows/pr-welcome.yml@main
+    with:
+      allowed-types: '["feat","fix","ci","build","chore","docs","refactor","test","style","perf"]'
+      jira-pattern: "ECOPROJECT-[0-9]+"
+      jira-required-types: '["feat","fix"]'
+      two-approval-types: '["feat","fix"]'
+      available-labels: '["ready-for-review","hold","work-in-progress"]'
+      additional-message: "For more details, see our [Contributing Guide](https://github.com/your-org/your-repo/blob/main/CONTRIBUTING.md)"
+```
+
+#### Inputs
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `allowed-types` | No | `["feat","fix","ci","build","chore","docs","refactor","test","style","perf"]` | JSON array of allowed commit/PR types |
+| `jira-pattern` | No | `[A-Z]+-[0-9]+` | Regex pattern for JIRA tickets |
+| `jira-required-types` | No | `["feat","fix"]` | JSON array of types requiring JIRA tickets |
+| `two-approval-types` | No | `["feat","fix"]` | JSON array of types requiring 2 approvals |
+| `available-labels` | No | `["ready-for-review","hold","work-in-progress"]` | JSON array of available PR label commands |
+| `additional-message` | No | `''` | Custom message to append to the welcome comment |
+
+#### What the Welcome Comment Includes
+
+1. **Thank you message** - Mentions the contributor
+2. **PR workflow instructions** - How to use label commands
+3. **Available labels** - Table of label commands and their purpose
+4. **Commit message format** - Conventional commits guidelines with examples
+5. **PR title format** - Same format as commits
+6. **Approval requirements** - Based on PR type
+7. **Custom message** - Optional additional instructions (if provided)
+
+---
+
 ## Repository Structure
 
 ```
 .
 ├── .github/
 │   ├── actions/
-│   │   └── determine-version/         # Composite action for version computation
+│   │   └── determine-version/                   # Composite action for version computation
 │   │       └── action.yml
 │   └── workflows/
-│       ├── generate-and-publish.yml   # Reusable workflow for OpenAPI clients
-│       └── test.yml                   # CI test workflow
-├── .actrc                             # act-cli configuration
+│       ├── generate-and-publish.yml             # Reusable workflow for OpenAPI clients
+│       ├── validate-commit-messages.yml         # Reusable workflow for commit message validation
+│       ├── validate-pr-title-description.yml    # Reusable workflow for PR title/description validation
+│       ├── pr-approval-check.yml                # Reusable workflow for PR approval requirements
+│       ├── pr-welcome.yml                       # Reusable workflow for PR welcome messages
+│       ├── pr-label-commands.yml                # Reusable workflow for PR label commands
+│       ├── tag-summary.yml                      # Reusable workflow for tag summaries
+│       └── test.yml                             # CI test workflow
+├── .actrc                                       # act-cli configuration
 ├── .gitignore
-├── Makefile                           # Local testing commands
-├── AGENTS.md                          # AI agent guidelines
-├── LICENSE                            # Apache-2.0
-└── README.md                          # This file
+├── Makefile                                     # Local testing commands
+├── AGENTS.md                                    # AI agent guidelines
+├── LICENSE                                      # Apache-2.0
+└── README.md                                    # This file
 ```
 
 ## Related

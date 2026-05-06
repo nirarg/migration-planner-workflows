@@ -1,0 +1,195 @@
+name: PR approval check
+
+on:
+  workflow_call:
+    inputs:
+      pr-type:
+        required: false
+        type: string
+        description: "The PR type (optional - will be extracted from PR title if not provided)"
+      two-approval-types:
+        required: false
+        type: string
+        default: '["feat","fix"]'
+        description: "JSON array of PR types requiring 2 human approvals (no auto-approve)"
+      bot-authors:
+        required: false
+        type: string
+        default: '["red-hat-konflux[bot]","dependabot[bot]"]'
+        description: "JSON array of bot authors that get auto-approval"
+      bot-labels:
+        required: false
+        type: string
+        default: '["ready-for-review"]'
+        description: "JSON array of labels to add to bot PRs (set to empty array [] to disable auto-labeling)"
+    secrets:
+      github-token:
+        required: false
+        description: "GitHub token with pull_request write permissions (defaults to GITHUB_TOKEN)"
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  check-approvals:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check approval count
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.github-token || secrets.GITHUB_TOKEN }}
+          script: |
+            const twoApprovalTypes = JSON.parse('${{ inputs.two-approval-types }}');
+            const botAuthors = JSON.parse('${{ inputs.bot-authors }}');
+
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.setFailed("This workflow must run on pull_request");
+              return;
+            }
+
+            // Extract PR type from input or from PR title
+            let prType = '${{ inputs.pr-type }}';
+
+            if (!prType) {
+              // Extract type from PR title: [JIRA |] type: description
+              const prTitle = pr.title;
+              const titlePattern = /^(?:[A-Z]+-[0-9]+\s*\|\s*)?([a-zA-Z]+):\s*(.+)$/;
+              const match = prTitle.match(titlePattern);
+
+              if (!match) {
+                core.setFailed(
+                  `❌ Cannot determine PR type from title: "${prTitle}"\n\n` +
+                  `Expected format: [JIRA-TICKET |] type: description\n` +
+                  `Note: Run validate-pr-title-description workflow first or provide pr-type input.`
+                );
+                return;
+              }
+
+              prType = match[1].toLowerCase();
+              core.info(`📦 PR type extracted from title: ${prType}`);
+            } else {
+              core.info(`📦 PR type from input: ${prType}`);
+            }
+
+            const prAuthor = pr.user.login;
+            core.info(`👤 PR author: ${prAuthor}`);
+
+            // ---- Add labels to bot PRs if configured ----
+            const botLabels = JSON.parse('${{ inputs.bot-labels }}');
+            if (botLabels.length > 0 && botAuthors.includes(prAuthor)) {
+              core.info(`🤖 PR author is a bot, adding labels: ${botLabels.join(', ')}`);
+              try {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  labels: botLabels
+                });
+                core.info(`✅ Successfully added labels to PR #${pr.number}`);
+              } catch (error) {
+                core.warning(`⚠️ Failed to add labels: ${error.message}`);
+              }
+            }
+
+            // ---- Get the token owner to check for self-approval ----
+            let tokenOwner = 'github-actions[bot]'; // default for GITHUB_TOKEN
+            try {
+              const { data: user } = await github.rest.users.getAuthenticated();
+              tokenOwner = user.login;
+              core.info(`🔑 Token owner: ${tokenOwner}`);
+            } catch (error) {
+              core.warning(`Could not get token owner: ${error.message}`);
+            }
+
+            // ---- Check if this would be self-approval ----
+            if (prAuthor === tokenOwner) {
+              core.warning(`⚠️ Cannot auto-approve: PR author (${prAuthor}) is the same as the token owner`);
+              core.warning(`💡 Tip: Use a PAT from a different user or a bot account for auto-approvals`);
+              return;
+            }
+
+            // ---- Determine if this PR should get auto-approval ----
+            // Auto-approve if: bot author OR PR type NOT in two-approval-types
+            const shouldAutoApprove = botAuthors.includes(prAuthor) || !twoApprovalTypes.includes(prType);
+
+            if (shouldAutoApprove) {
+              core.info(`🤖 Auto-approval eligible: ${botAuthors.includes(prAuthor) ? 'bot author' : `PR type "${prType}"`}`);
+            } else {
+              core.info(`🔒 No auto-approval: PR type "${prType}" requires 2 human approvals`);
+            }
+
+            // ---- Count existing approvals ----
+            const reviews = await github.paginate(
+              github.rest.pulls.listReviews,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+                per_page: 100
+              }
+            );
+
+            // Get the latest review state per reviewer
+            const reviewerStates = new Map();
+            for (const review of reviews) {
+              const reviewer = review.user.login;
+              const submittedAt = new Date(review.submitted_at);
+
+              if (!reviewerStates.has(reviewer) ||
+                  submittedAt > reviewerStates.get(reviewer).submittedAt) {
+                reviewerStates.set(reviewer, {
+                  state: review.state,
+                  submittedAt: submittedAt
+                });
+              }
+            }
+
+            // Count approvals and check if bot already approved
+            let approvalCount = 0;
+            const approvers = [];
+            let botAlreadyApproved = false;
+            const botUsername = 'github-actions[bot]';
+
+            for (const [reviewer, reviewData] of reviewerStates.entries()) {
+              if (reviewData.state === 'APPROVED') {
+                approvalCount++;
+                approvers.push(reviewer);
+
+                if (reviewer === botUsername) {
+                  botAlreadyApproved = true;
+                }
+              }
+            }
+
+            core.info(`👍 Current approvals: ${approvalCount} (${approvers.join(', ') || 'none'})`);
+            if (botAlreadyApproved) {
+              core.info(`🤖 Bot has already approved this PR`);
+            }
+
+            // ---- Auto-approve if needed ----
+            // GitHub is configured to require 2 approvals
+            // Auto-approve eligible PRs if bot hasn't already approved
+            if (shouldAutoApprove && !botAlreadyApproved) {
+              core.info(`✅ Auto-approving to satisfy GitHub's 2-approval requirement`);
+
+              try {
+                await github.rest.pulls.createReview({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: pr.number,
+                  event: 'APPROVE',
+                  body: `🤖 **Automated approval**\n\nThis PR only requires 1 human approval because:\n${botAuthors.includes(prAuthor) ? `- Author is a bot (${prAuthor})` : `- PR type is "${prType}" (not feat/fix)`}\n\nGitHub branch protection requires 2 approvals, so this automated approval is added to satisfy that requirement.`
+                });
+
+                core.info(`✅ Successfully auto-approved PR`);
+              } catch (error) {
+                core.warning(`⚠️ Failed to auto-approve: ${error.message}`);
+              }
+            } else if (!shouldAutoApprove) {
+              core.info(`ℹ️ No auto-approval: PR type "${prType}" requires 2 human approvals`);
+            } else if (botAlreadyApproved) {
+              core.info(`ℹ️ Auto-approval not needed: Bot has already approved`);
+            }

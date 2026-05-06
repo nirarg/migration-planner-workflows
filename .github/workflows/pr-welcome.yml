@@ -1,0 +1,139 @@
+name: PR Welcome Message
+
+on:
+  workflow_call:
+    inputs:
+      allowed-types:
+        required: false
+        type: string
+        default: '["feat","fix","ci","build","chore","docs","refactor","test","style","perf"]'
+        description: "JSON array of allowed commit/PR types"
+      jira-pattern:
+        required: false
+        type: string
+        default: "[A-Z]+-[0-9]+"
+        description: "Regex pattern for JIRA tickets"
+      jira-required-types:
+        required: false
+        type: string
+        default: '["feat","fix"]'
+        description: "JSON array of types requiring JIRA tickets"
+      two-approval-types:
+        required: false
+        type: string
+        default: '["feat","fix"]'
+        description: "JSON array of types requiring 2 approvals"
+      available-labels:
+        required: false
+        type: string
+        default: '["ready-for-review","hold","work-in-progress"]'
+        description: "JSON array of available PR labels"
+      additional-message:
+        required: false
+        type: string
+        default: ''
+        description: "Additional custom message to append"
+
+permissions:
+  pull-requests: write
+
+jobs:
+  welcome:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Welcome contributor
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prAuthor = context.payload.pull_request.user.login;
+            const prNumber = context.payload.pull_request.number;
+
+            const allowedTypes = JSON.parse('${{ inputs.allowed-types }}');
+            const jiraPattern = '${{ inputs.jira-pattern }}';
+            const jiraRequiredTypes = JSON.parse('${{ inputs.jira-required-types }}');
+            const twoApprovalTypes = JSON.parse('${{ inputs.two-approval-types }}');
+            const availableLabels = JSON.parse('${{ inputs.available-labels }}');
+            const additionalMessage = '${{ inputs.additional-message }}';
+
+            // Build label commands table
+            const labelCommands = availableLabels.map(label => {
+              return `| \`/${label}\` | \`${label}\` | ${getLabelDescription(label)} |`;
+            }).join('\n');
+
+            function getLabelDescription(label) {
+              const descriptions = {
+                'ready-for-review': 'Mark PR as ready for review',
+                'hold': 'Put PR on hold (prevent merge)',
+                'work-in-progress': 'Mark PR as work in progress'
+              };
+              return descriptions[label] || 'Apply label';
+            }
+
+            // Build the message
+            const backtick = '`';
+            const tripleBacktick = '```';
+
+            let message = '## 👋 Thank you for your contribution, @' + prAuthor + '!\n\n';
+            message += 'We appreciate you taking the time to submit this pull request. Here are some guidelines to help move your PR forward:\n\n';
+
+            message += '### 📝 PR Workflow\n\n';
+            message += 'When your PR is **ready for review**, add the ' + backtick + 'ready-for-review' + backtick + ' label by commenting:\n';
+            message += tripleBacktick + '\n/ready-for-review\n' + tripleBacktick + '\n\n';
+
+            message += '### 🏷️ Available Labels\n\n';
+            message += 'You can manage your PR status using these label commands:\n\n';
+            message += '| Command | Label | Purpose |\n';
+            message += '|---------|-------|---------|\n';
+            message += labelCommands + '\n\n';
+            message += 'To remove a label, add ' + backtick + 'cancel' + backtick + ' after the command: ' + backtick + '/ready-for-review cancel' + backtick + '\n\n';
+
+            message += '### 📋 Commit Message Format\n\n';
+            message += 'All commits must follow the [Conventional Commits](https://www.conventionalcommits.org/) format:\n\n';
+            message += '**Format:** ' + backtick + '[JIRA-TICKET |] type: description' + backtick + '\n\n';
+            message += '**Allowed types:** ' + allowedTypes.map(t => backtick + t + backtick).join(', ') + '\n\n';
+            message += '**Examples:**\n';
+            message += tripleBacktick + '\n';
+            message += 'feat: add user authentication\n';
+            message += jiraPattern.replace(/\[0-9\]\+/, '123') + ' | fix: handle null pointer in auth\n';
+            message += 'chore: update dependencies\n';
+            message += tripleBacktick + '\n\n';
+
+            if (jiraRequiredTypes.length > 0) {
+              message += '**JIRA tickets required for:** ' + jiraRequiredTypes.map(t => backtick + t + backtick).join(', ') + ' commits (can be in commit message or PR description)\n\n';
+            }
+
+            message += '### 🎯 PR Title Format\n\n';
+            message += 'Your PR title must follow the same format as commits:\n\n';
+            message += '**Format:** ' + backtick + '[JIRA-TICKET |] type: description' + backtick + '\n\n';
+            message += '**Examples:**\n';
+            message += tripleBacktick + '\n';
+            message += 'feat: add user login flow\n';
+            message += jiraPattern.replace(/\[0-9\]\+/, '456') + ' | fix: handle edge case in parser\n';
+            message += 'chore: update documentation\n';
+            message += tripleBacktick + '\n\n';
+
+            message += '### ✅ Approval Requirements\n\n';
+            if (twoApprovalTypes.length > 0) {
+              message += '- **' + twoApprovalTypes.map(t => backtick + t + backtick).join(' / ') + ' PRs:** Require **2 approvals**\n';
+            }
+            message += '- **Other types:** Require **1 approval**';
+            if (twoApprovalTypes.length > 0) {
+              message += ' (auto-approved after first human approval)';
+            }
+            message += '\n\n';
+
+            if (additionalMessage) {
+              message += '---\n\n' + additionalMessage + '\n\n';
+            }
+
+            message += '---\n\n';
+            message += 'If you have any questions, feel free to ask in the comments. Happy coding! 🚀';
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: message
+            });
+
+            console.log(`✅ Welcome comment posted to PR #${prNumber}`);
